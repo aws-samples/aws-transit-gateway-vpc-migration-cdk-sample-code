@@ -260,6 +260,24 @@ Sample definition with attachment information given. When attachment information
 
 ------
 
+### Cleaning Up
+
+To remove the architecutre build, there are two commands that need to be run:
+
+```
+❯ cdk destroy --all 
+```
+
+This will destroy 'almost' all of the deployed archtiecture. It won't destroy the DynamoDB table by design.
+
+If you want to destroy the DynamoDB table, you can use the following AWS CLI command, as we know the DynamoDB table was created with the name MigrationAutomation
+
+```
+❯ aws dynamodb delete-table --table-name MigrationAutomation
+```
+
+------
+
 ## Security
 
 See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
