@@ -1,0 +1,499 @@
+{
+  "Comment": "Migration main flow",
+  "StartAt": "Get current region",
+  "States": {
+    "Get current region": {
+      "Type": "Task",
+      "Next": "Get current account",
+      "Parameters": {},
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeAvailabilityZones",
+      "ResultSelector": {
+        "Name.$": "$.AvailabilityZones[0].RegionName"
+      },
+      "ResultPath": "$.Region"
+    },
+    "Get current account": {
+      "Type": "Task",
+      "Next": "Are attachments provided?",
+      "Parameters": {},
+      "Resource": "arn:aws:states:::aws-sdk:sts:getCallerIdentity",
+      "ResultSelector": {
+        "Id.$": "$.Account"
+      },
+      "ResultPath": "$.Account"
+    },
+    "Are attachments provided?": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Attachments",
+          "IsPresent": true,
+          "Next": "Restructure input data"
+        }
+      ],
+      "Default": "DescribeTransitGatewayVpcAttachments"
+    },
+    "Restructure input data": {
+      "Type": "Pass",
+      "Next": "Loop attachments",
+      "Parameters": {
+        "Data.$": "$.Attachments"
+      },
+      "ResultPath": "$.Attachments"
+    },
+    "DescribeTransitGatewayVpcAttachments": {
+      "Type": "Task",
+      "Next": "Loop attachments",
+      "Parameters": {
+        "Filters": [
+          {
+            "Name": "tag:Migrate",
+            "Values": [
+              "True"
+            ]
+          }
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:describeTransitGatewayVpcAttachments",
+      "ResultSelector": {
+        "Data.$": "$.TransitGatewayVpcAttachments[*]['TransitGatewayAttachmentId', 'VpcId']"
+      },
+      "ResultPath": "$.Attachments"
+    },
+    "Loop attachments": {
+      "Type": "Map",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "INLINE"
+        },
+        "StartAt": "Check if this is DryRun",
+        "States": {
+          "Migration failed information": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:updateItem",
+            "Parameters": {
+              "TableName": "MigrationAutomation",
+              "Key": {
+                "JobId": {
+                  "S.$": "States.ArrayGetItem(States.StringSplit($$.Execution.Id, ':'), 7)"
+                },
+                "AttachmentId": {
+                  "S.$": "$.AttachmentData.TransitGatewayAttachmentId"
+                }
+              },
+              "UpdateExpression": "SET Failed = :data",
+              "ExpressionAttributeValues": {
+                ":data": {
+                  "BOOL": "True"
+                }
+              }
+            },
+            "ResultPath": null,
+            "Next": "Migration failed"
+          },
+          "Migration failed": {
+            "Type": "Fail"
+          },
+          "Check if this is DryRun": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Variable": "$.DryRun",
+                "BooleanEquals": true,
+                "Next": "Job started information - DryRun"
+              }
+            ],
+            "Default": "Job started information"
+          },
+          "Job started information - DryRun": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:putItem",
+            "Parameters": {
+              "TableName": "MigrationAutomation",
+              "Item": {
+                "JobId": {
+                  "S.$": "$.ExecutionId"
+                },
+                "AttachmentId": {
+                  "S.$": "$.AttachmentData.TransitGatewayAttachmentId"
+                },
+                "VpcId": {
+                  "S.$": "$.AttachmentData.VpcId"
+                },
+                "MigrationStarted": {
+                  "S.$": "$$.State.EnteredTime"
+                },
+                "DryRun": {
+                  "BOOL": "True"
+                }
+              }
+            },
+            "ResultPath": null,
+            "Next": "Network reachability validation before migration - DryRun"
+          },
+          "Job started information": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:putItem",
+            "Parameters": {
+              "TableName": "MigrationAutomation",
+              "Item": {
+                "JobId": {
+                  "S.$": "$.ExecutionId"
+                },
+                "AttachmentId": {
+                  "S.$": "$.AttachmentData.TransitGatewayAttachmentId"
+                },
+                "VpcId": {
+                  "S.$": "$.AttachmentData.VpcId"
+                },
+                "MigrationStarted": {
+                  "S.$": "$$.State.EnteredTime"
+                }
+              }
+            },
+            "ResultPath": null,
+            "Next": "Tag attachments with execution ID",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ]
+          },
+          "Tag attachments with execution ID": {
+            "Type": "Task",
+            "Parameters": {
+              "Resources.$": "States.Array($.AttachmentData.TransitGatewayAttachmentId)",
+              "Tags": [
+                {
+                  "Key": "migrate-job-id",
+                  "Value.$": "$.ExecutionId"
+                }
+              ]
+            },
+            "Resource": "arn:aws:states:::aws-sdk:ec2:createTags",
+            "ResultPath": null,
+            "Next": "Network reachability validation before migration",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ]
+          },
+          "Network reachability validation before migration - DryRun": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::states:startExecution.sync:2",
+            "Parameters": {
+              "StateMachineArn.$": "States.Format('arn:aws:states:{}:{}:stateMachine:ReachabilityAnalyser1to1', $.Region, $.Account)",
+              "Input": {
+                "TransitGatewayAttachmentId.$": "$.AttachmentData.TransitGatewayAttachmentId",
+                "NetworkPaths.$": "$.NetworkPaths",
+                "ExecutionId.$": "$.ExecutionId"
+              }
+            },
+            "Next": "Is checks field empty",
+            "ResultSelector": {
+              "Checks.$": "$.Output[*].PathInfo.PathId"
+            },
+            "ResultPath": "$.Prevalidation"
+          },
+          "Is checks field empty": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Not": {
+                  "Variable": "$.Prevalidation.Checks[0]",
+                  "IsPresent": true
+                },
+                "Next": "Migration ended timestamp"
+              }
+            ],
+            "Default": "Prevalidation information - DryRun"
+          },
+          "Prevalidation information - DryRun": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:updateItem",
+            "Parameters": {
+              "TableName": "MigrationAutomation",
+              "Key": {
+                "JobId": {
+                  "S.$": "States.ArrayGetItem(States.StringSplit($$.Execution.Id, ':'), 7)"
+                },
+                "AttachmentId": {
+                  "S.$": "$.AttachmentData.TransitGatewayAttachmentId"
+                }
+              },
+              "UpdateExpression": "SET Prevalidation = :data",
+              "ExpressionAttributeValues": {
+                ":data": {
+                  "SS.$": "$.Prevalidation.Checks"
+                }
+              }
+            },
+            "ResultPath": null,
+            "Next": "Migration ended timestamp"
+          },
+          "Migration ended timestamp": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:updateItem",
+            "Parameters": {
+              "TableName": "MigrationAutomation",
+              "Key": {
+                "JobId": {
+                  "S.$": "States.ArrayGetItem(States.StringSplit($$.Execution.Id, ':'), 7)"
+                },
+                "AttachmentId": {
+                  "S.$": "$.AttachmentData.TransitGatewayAttachmentId"
+                }
+              },
+              "UpdateExpression": "SET MigrationEnded = :data",
+              "ExpressionAttributeValues": {
+                ":data": {
+                  "S.$": "$$.State.EnteredTime"
+                }
+              }
+            },
+            "ResultPath": null,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ],
+            "End": true
+          },
+          "Network reachability validation before migration": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::states:startExecution.sync:2",
+            "Parameters": {
+              "StateMachineArn.$": "States.Format('arn:aws:states:{}:{}:stateMachine:ReachabilityAnalyser1to1', $.Region, $.Account)",
+              "Input": {
+                "TransitGatewayAttachmentId.$": "$.AttachmentData.TransitGatewayAttachmentId",
+                "NetworkPaths.$": "$.NetworkPaths",
+                "ExecutionId.$": "$.ExecutionId"
+              }
+            },
+            "Next": "Is checks field empty - 2",
+            "ResultSelector": {
+              "Checks.$": "$.Output[*].PathInfo.PathId"
+            },
+            "ResultPath": "$.Prevalidation",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ]
+          },
+          "Is checks field empty - 2": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Not": {
+                  "Variable": "$.Prevalidation.Checks[0]",
+                  "IsPresent": true
+                },
+                "Next": "Migrate attachment"
+              }
+            ],
+            "Default": "Prevalidation information"
+          },
+          "Prevalidation information": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:updateItem",
+            "Parameters": {
+              "TableName": "MigrationAutomation",
+              "Key": {
+                "JobId": {
+                  "S.$": "States.ArrayGetItem(States.StringSplit($$.Execution.Id, ':'), 7)"
+                },
+                "AttachmentId": {
+                  "S.$": "$.AttachmentData.TransitGatewayAttachmentId"
+                }
+              },
+              "UpdateExpression": "SET Prevalidation = :data",
+              "ExpressionAttributeValues": {
+                ":data": {
+                  "SS.$": "$.Prevalidation.Checks"
+                }
+              }
+            },
+            "Next": "Migrate attachment",
+            "ResultPath": null,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ]
+          },
+          "Migrate attachment": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::states:startExecution.sync:2",
+            "Parameters": {
+              "StateMachineArn.$": "States.Format('arn:aws:states:{}:{}:stateMachine:MigrateAttachment', $.Region, $.Account)",
+              "Input": {
+                "TransitGatewayAttachmentId.$": "$.AttachmentData.TransitGatewayAttachmentId",
+                "SourceRouteTableId.$": "$.SourceRouteTableId",
+                "TargetRouteTableId.$": "$.TargetRouteTableId",
+                "ExecutionId.$": "$.ExecutionId",
+                "RoutePropagation.$": "$.RoutePropagation"
+              }
+            },
+            "Next": "Network reachability validation after migration",
+            "ResultPath": null,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ]
+          },
+          "Network reachability validation after migration": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::states:startExecution.sync:2",
+            "Parameters": {
+              "StateMachineArn.$": "States.Format('arn:aws:states:{}:{}:stateMachine:ReachabilityAnalyser1to1', $.Region, $.Account)",
+              "Input": {
+                "TransitGatewayAttachmentId.$": "$.AttachmentData.TransitGatewayAttachmentId",
+                "NetworkPaths.$": "$.NetworkPaths",
+                "ExecutionId.$": "$.ExecutionId"
+              }
+            },
+            "Next": "Is checks field empty - 3",
+            "ResultSelector": {
+              "Checks.$": "$.Output[*].PathInfo.PathId"
+            },
+            "ResultPath": "$.Postvalidation",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ]
+          },
+          "Is checks field empty - 3": {
+            "Type": "Choice",
+            "Choices": [
+              {
+                "Not": {
+                  "Variable": "$.Prevalidation.Checks[0]",
+                  "IsPresent": true
+                },
+                "Next": "Tag attachment with migration done"
+              }
+            ],
+            "Default": "Postvalidation information"
+          },
+          "Postvalidation information": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::dynamodb:updateItem",
+            "Parameters": {
+              "TableName": "MigrationAutomation",
+              "Key": {
+                "JobId": {
+                  "S.$": "States.ArrayGetItem(States.StringSplit($$.Execution.Id, ':'), 7)"
+                },
+                "AttachmentId": {
+                  "S.$": "$.AttachmentData.TransitGatewayAttachmentId"
+                }
+              },
+              "UpdateExpression": "SET Postvalidation = :data",
+              "ExpressionAttributeValues": {
+                ":data": {
+                  "SS.$": "$.Postvalidation.Checks"
+                }
+              }
+            },
+            "Next": "Tag attachment with migration done",
+            "ResultPath": null,
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ]
+          },
+          "Tag attachment with migration done": {
+            "Type": "Task",
+            "Parameters": {
+              "Resources.$": "States.Array($.AttachmentData.TransitGatewayAttachmentId)",
+              "Tags": [
+                {
+                  "Key": "migration-done",
+                  "Value": "true"
+                }
+              ]
+            },
+            "Resource": "arn:aws:states:::aws-sdk:ec2:createTags",
+            "ResultPath": null,
+            "Next": "Delete tag {Migrate: True}",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ]
+          },
+          "Delete tag {Migrate: True}": {
+            "Type": "Task",
+            "Parameters": {
+              "Resources.$": "States.Array($.AttachmentData.TransitGatewayAttachmentId)",
+              "Tags": [
+                {
+                  "Key": "Migrate",
+                  "Value": "True"
+                }
+              ]
+            },
+            "Resource": "arn:aws:states:::aws-sdk:ec2:deleteTags",
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "Next": "Migration failed information"
+              }
+            ],
+            "Next": "Migration ended timestamp",
+            "ResultPath": null
+          }
+        }
+      },
+      "End": true,
+      "ItemsPath": "$.Attachments.Data",
+      "ItemSelector": {
+        "AttachmentData.$": "$$.Map.Item.Value",
+        "ExecutionId.$": "States.ArrayGetItem(States.StringSplit($$.Execution.Id, ':'), 7)",
+        "SourceRouteTableId.$": "$.SourceRouteTableId",
+        "TargetRouteTableId.$": "$.TargetRouteTableId",
+        "NetworkPaths.$": "$.NetworkPaths",
+        "DryRun.$": "$.DryRun",
+        "Region.$": "$.Region.Name",
+        "Account.$": "$.Account.Id",
+        "RoutePropagation.$": "$.RoutePropagation"
+      },
+      "ResultPath": null,
+      "MaxConcurrency": 1
+    }
+  }
+}

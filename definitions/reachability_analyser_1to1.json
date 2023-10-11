@@ -1,0 +1,135 @@
+{
+  "Comment": "Reachability analyser 1 to 1",
+  "StartAt": "Map",
+  "States": {
+      "Map": {
+          "Type": "Map",
+          "ItemProcessor": {
+              "ProcessorConfig": {
+                  "Mode": "INLINE"
+              },
+              "StartAt": "If check is for this attachment",
+              "States": {
+                  "If check is for this attachment": {
+                      "Type": "Choice",
+                      "Choices": [
+                          {
+                              "Variable": "$.TransitGatewayAttachmentId",
+                              "StringEqualsPath": "$.NetworkPath.TransitGatewayAttachmentId",
+                              "Next": "CreateNetworkInsightsPath"
+                          }
+                      ],
+                      "Default": "Path was not related to this attachment"
+                  },
+                  "Path was not related to this attachment": {
+                      "Type": "Pass",
+                      "End": true
+                  },
+                  "CreateNetworkInsightsPath": {
+                      "Type": "Task",
+                      "Parameters": {
+                          "ClientToken.$": "States.UUID()",
+                          "Protocol.$": "$.NetworkPath.Protocol",
+                          "Source.$": "$.NetworkPath.Source",
+                          "Destination.$": "$.NetworkPath.Destination",
+                          "DestinationPort.$": "$.NetworkPath.DestinationPort"
+                      },
+                      "Resource": "arn:aws:states:::aws-sdk:ec2:createNetworkInsightsPath",
+                      "ResultSelector": {
+                          "PathId.$": "$.NetworkInsightsPath.NetworkInsightsPathId",
+                          "PathArn.$": "$.NetworkInsightsPath.NetworkInsightsPathArn"
+                      },
+                      "Next": "StartNetworkInsightsAnalysis",
+                      "ResultPath": "$.PathInfo"
+                  },
+                  "StartNetworkInsightsAnalysis": {
+                      "Type": "Task",
+                      "Parameters": {
+                          "ClientToken.$": "States.UUID()",
+                          "NetworkInsightsPathId.$": "$.PathInfo.PathId"
+                      },
+                      "Resource": "arn:aws:states:::aws-sdk:ec2:startNetworkInsightsAnalysis",
+                      "Next": "Choice",
+                      "ResultSelector": {
+                          "AnalysisId.$": "$.NetworkInsightsAnalysis.NetworkInsightsAnalysisId",
+                          "Status.$": "$.NetworkInsightsAnalysis.Status"
+                      },
+                      "ResultPath": "$.PathAnalysis"
+                  },
+                  "Choice": {
+                      "Type": "Choice",
+                      "Choices": [
+                          {
+                              "Variable": "$.PathAnalysis.Status",
+                              "StringEquals": "running",
+                              "Next": "Get analysis status"
+                          },
+                          {
+                              "Variable": "$.PathAnalysis.Status",
+                              "StringEquals": "succeeded",
+                              "Next": "Get analysis result"
+                          }
+                      ]
+                  },
+                  "Get analysis status": {
+                      "Type": "Task",
+                      "Parameters": {
+                          "NetworkInsightsAnalysisIds.$": "States.Array($.PathAnalysis.AnalysisId)"
+                      },
+                      "Resource": "arn:aws:states:::aws-sdk:ec2:describeNetworkInsightsAnalyses",
+                      "ResultSelector": {
+                          "AnalysisId.$": "$.NetworkInsightsAnalyses[0].NetworkInsightsAnalysisId",
+                          "Status.$": "$.NetworkInsightsAnalyses[0].Status"
+                      },
+                      "ResultPath": "$.PathAnalysis",
+                      "Next": "Wait"
+                  },
+                  "Wait": {
+                      "Type": "Wait",
+                      "Seconds": 5,
+                      "Next": "Choice"
+                  },
+                  "Get analysis result": {
+                      "Type": "Task",
+                      "Parameters": {
+                          "NetworkInsightsAnalysisIds.$": "States.Array($.PathAnalysis.AnalysisId)"
+                      },
+                      "Resource": "arn:aws:states:::aws-sdk:ec2:describeNetworkInsightsAnalyses",
+                      "ResultSelector": {
+                          "AnalysisId.$": "$.NetworkInsightsAnalyses[0].NetworkInsightsAnalysisId",
+                          "Status.$": "$.NetworkInsightsAnalyses[0].Status",
+                          "PathFound.$": "$.NetworkInsightsAnalyses[0].NetworkPathFound"
+                      },
+                      "ResultPath": "$.PathAnalysis",
+                      "Next": "Is path reachable?"
+                  },
+                  "Is path reachable?": {
+                      "Type": "Choice",
+                      "Choices": [
+                          {
+                              "Variable": "$.PathAnalysis.PathFound ",
+                              "BooleanEquals": true,
+                              "Next": "Path reachable"
+                          }
+                      ],
+                      "Default": "Path not reachable"
+                  },
+                  "Path reachable": {
+                      "Type": "Succeed"
+                  },
+                  "Path not reachable": {
+                      "Type": "Fail",
+                      "Error": "PathNotReachable"
+                  }
+              }
+          },
+          "ItemsPath": "$.NetworkPaths",
+          "ItemSelector": {
+              "NetworkPath.$": "$$.Map.Item.Value",
+              "ExecutionId.$": "$.ExecutionId",
+              "TransitGatewayAttachmentId.$": "$.TransitGatewayAttachmentId"
+          },
+          "End": true
+      }
+  }
+}

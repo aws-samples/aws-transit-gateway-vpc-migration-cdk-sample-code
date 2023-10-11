@@ -1,0 +1,172 @@
+{
+  "Comment": "Migrate attachment within same TGW",
+  "StartAt": "Check current association state",
+  "States": {
+    "Check current association state": {
+      "Type": "Task",
+      "Parameters": {
+        "TransitGatewayRouteTableId.$": "$.SourceRouteTableId",
+        "Filters": [
+          {
+            "Name": "transit-gateway-attachment-id",
+            "Values.$": "States.Array($.TransitGatewayAttachmentId)"
+          }
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:getTransitGatewayRouteTableAssociations",
+      "Next": "Verify that attachment is associated",
+      "ResultPath": "$.Associations"
+    },
+    "Verify that attachment is associated": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.Associations.Associations[0].State",
+            "IsPresent": true
+          },
+          "Next": "Attachment not associated"
+        },
+        {
+          "Variable": "$.Associations.Associations[0].State",
+          "StringEquals": "associated",
+          "Next": "DisassociateTransitGatewayRouteTable"
+        }
+      ],
+      "Default": "Attachment not associated"
+    },
+    "DisassociateTransitGatewayRouteTable": {
+      "Type": "Task",
+      "Parameters": {
+        "TransitGatewayAttachmentId.$": "$.TransitGatewayAttachmentId",
+        "TransitGatewayRouteTableId.$": "$.SourceRouteTableId"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:disassociateTransitGatewayRouteTable",
+      "Next": "Check disassociation state",
+      "ResultSelector": {
+        "State.$": "$.Association.State"
+      },
+      "ResultPath": "$.Association"
+    },
+    "Check disassociation state": {
+      "Type": "Task",
+      "Next": "VerifyDisassociated",
+      "Parameters": {
+        "TransitGatewayRouteTableId.$": "$.SourceRouteTableId",
+        "Filters": [
+          {
+            "Name": "transit-gateway-attachment-id",
+            "Values.$": "States.Array($.TransitGatewayAttachmentId)"
+          }
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:getTransitGatewayRouteTableAssociations",
+      "ResultPath": "$.Associations"
+    },
+    "VerifyDisassociated": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Not": {
+            "Variable": "$.Associations.Associations[0].State",
+            "IsPresent": true
+          },
+          "Next": "AssociateTransitGatewayRouteTable"
+        },
+        {
+          "Variable": "$.Associations.Associations[0].State",
+          "StringEquals": "disassociating",
+          "Next": "Wait"
+        }
+      ],
+      "Default": "Disassociation failed"
+    },
+    "Disassociation failed": {
+      "Type": "Fail",
+      "Error": "AttachmentDisassociationFailed"
+    },
+    "AssociateTransitGatewayRouteTable": {
+      "Type": "Task",
+      "Parameters": {
+        "TransitGatewayAttachmentId.$": "$.TransitGatewayAttachmentId",
+        "TransitGatewayRouteTableId.$": "$.TargetRouteTableId"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:associateTransitGatewayRouteTable",
+      "Next": "Check new association state",
+      "ResultPath": null
+    },
+    "Check new association state": {
+      "Type": "Task",
+      "Parameters": {
+        "TransitGatewayRouteTableId.$": "$.TargetRouteTableId",
+        "Filters": [
+          {
+            "Name": "transit-gateway-attachment-id",
+            "Values.$": "States.Array($.TransitGatewayAttachmentId)"
+          }
+        ]
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:getTransitGatewayRouteTableAssociations",
+      "Next": "VerifyNewAssociation",
+      "ResultPath": "$.Associations"
+    },
+    "VerifyNewAssociation": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.Associations.Associations[0].State",
+          "StringEquals": "associating",
+          "Next": "WaitForAssociationToFinish"
+        },
+        {
+          "Variable": "$.Associations.Associations[0].State",
+          "StringEquals": "associated",
+          "Next": "Is route propagation disabled"
+        }
+      ],
+      "Default": "Attachment association failed"
+    },
+    "Is route propagation disabled": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.RoutePropagation",
+          "BooleanEquals": false,
+          "Next": "Success"
+        }
+      ],
+      "Default": "Propagate attachment route to target route table"
+    },
+    "Propagate attachment route to target route table": {
+      "Type": "Task",
+      "Next": "Success",
+      "Parameters": {
+        "TransitGatewayRouteTableId.$": "$.TargetRouteTableId",
+        "TransitGatewayAttachmentId.$": "$.TransitGatewayAttachmentId"
+      },
+      "Resource": "arn:aws:states:::aws-sdk:ec2:enableTransitGatewayRouteTablePropagation",
+      "ResultPath": null
+    },
+    "WaitForAssociationToFinish": {
+      "Type": "Wait",
+      "Seconds": 2,
+      "Next": "Check new association state"
+    },
+    "Attachment association failed": {
+      "Type": "Fail",
+      "Error": "AttachmentAssociationFailed"
+    },
+    "Wait": {
+      "Type": "Wait",
+      "Seconds": 2,
+      "Next": "Check disassociation state"
+    },
+    "Attachment not associated": {
+      "Type": "Fail",
+      "Error": "AttachmentInvalidState"
+    },
+    "Success": {
+      "Type": "Succeed"
+    }
+  }
+}

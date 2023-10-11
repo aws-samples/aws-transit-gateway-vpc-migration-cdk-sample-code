@@ -1,0 +1,128 @@
+{
+    "Comment": "Find TGW attachments",
+    "StartAt": "Is attachment list predefined?",
+    "States": {
+      "Is attachment list predefined?": {
+        "Type": "Choice",
+        "Choices": [
+          {
+            "Variable": "$.Attachments",
+            "IsPresent": true,
+            "Next": "Pass"
+          }
+        ],
+        "Default": "Find tagged TGW attachments"
+      },
+      "Pass": {
+        "Type": "Pass",
+        "Next": "Loop over attachments",
+        "Parameters": {
+          "Attachments": {
+            "Before.$": "$.Attachments"
+          },
+          "ExecutionId.$": "$.ExecutionId"
+        }
+      },
+      "Find tagged TGW attachments": {
+        "Type": "Task",
+        "Parameters": {
+          "Filters": [
+            {
+              "Name": "tag:migrate",
+              "Values": [
+                "true"
+              ]
+            }
+          ]
+        },
+        "Resource": "arn:aws:states:::aws-sdk:ec2:describeTransitGatewayVpcAttachments",
+        "ResultSelector": {
+          "Before.$": "$.TransitGatewayVpcAttachments[*]['TransitGatewayAttachmentId', 'VpcId']"
+        },
+        "ResultPath": "$.Attachments",
+        "Next": "Attachments found ?"
+      },
+      "Attachments found ?": {
+        "Type": "Choice",
+        "Choices": [
+          {
+            "Not": {
+              "Variable": "$.Attachments.Before[0]",
+              "IsPresent": true
+            },
+            "Next": "No attachments found to migrate"
+          }
+        ],
+        "Default": "Loop over attachments"
+      },
+      "No attachments found to migrate": {
+        "Type": "Fail",
+        "Error": "NoAttachmentsFound",
+        "Cause": "No Transit Gateway Attachments found with tag {migrate:true}"
+      },
+      "Loop over attachments": {
+        "Type": "Map",
+        "ItemProcessor": {
+          "ProcessorConfig": {
+            "Mode": "INLINE"
+          },
+          "StartAt": "CreateTags",
+          "States": {
+            "CreateTags": {
+              "Type": "Task",
+              "Next": "DynamoDB PutItem",
+              "Parameters": {
+                "Resources.$": "States.Array($.Attachment.TransitGatewayAttachmentId)",
+                "Tags": [
+                  {
+                    "Key": "migrate-job-id",
+                    "Value.$": "$.ExecutionId"
+                  }
+                ]
+              },
+              "Resource": "arn:aws:states:::aws-sdk:ec2:createTags",
+              "ResultPath": null
+            },
+            "DynamoDB PutItem": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:putItem",
+              "Parameters": {
+                "TableName": "MigrationAutomation",
+                "Item": {
+                  "JobId": {
+                    "S.$": "$.ExecutionId"
+                  },
+                  "AttachmentId": {
+                    "S.$": "$.Attachment.TransitGatewayAttachmentId"
+                  },
+                  "VpcId": {
+                    "S.$": "$.Attachment.VpcId"
+                  }
+                }
+              },
+              "End": true,
+              "ResultPath": null
+            }
+          }
+        },
+        "ItemsPath": "$.Attachments.Before",
+        "ResultPath": null,
+        "Next": "Transform output",
+        "ItemSelector": {
+          "ExecutionId.$": "$.ExecutionId",
+          "Attachment.$": "$$.Map.Item.Value"
+        }
+      },
+      "Transform output": {
+        "Type": "Pass",
+        "Next": "Success",
+        "Parameters": {
+          "Before.$": "$.Attachments.Before"
+        },
+        "ResultPath": "$"
+      },
+      "Success": {
+        "Type": "Succeed"
+      }
+    }
+  }
