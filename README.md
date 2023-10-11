@@ -255,3 +255,16 @@ Sample definition with attachment information given. When attachment information
 ### Migrate attachment flow
 
 ![Migrate attachment flow structure](diagrams/migrate-attachment-flow.png)
+
+
+
+------
+
+## Security
+
+See [CONTRIBUTING](CONTRIBUTING.md#security-issue-notifications) for more information.
+
+## License
+
+This library is licensed under the MIT-0 License. See the LICENSE file.
+
